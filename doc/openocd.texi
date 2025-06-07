@@ -6640,6 +6640,56 @@ flash bank $_FLASHNAME dw-spi 0x40000000 0x02000000 4 4 $_TARGETNAME -jaguar2 -s
 
 @end deffn
 
+@deffn {Flash Driver} {scqspi}
+@cindex Space Cubics QSPI controller
+@cindex QuadSPI
+@cindex SC-OBC Module A1
+This driver provides support for the Space Cubics QSPI (QuadSPI) controller
+used on SC-OBC Module A1. It allows OpenOCD to access external NOR flash
+memory devices connected through the SC-OBC Module A1 QuadSPI interface.
+
+@table @b
+@item Description
+The driver communicates with one or more QSPI NOR flash devices attached to the controller.
+It supports reading, erasing, and programming operations.
+
+@item Syntax
+@example
+flash bank <name> scqspi <base> <size> <chip_width> <bus_width> <target#> <flash_start_addr> <mem_no>
+@end example
+
+@item Parameters
+@table @var
+@item base
+Base address of the flash memory mapping.  
+@item size
+Flash size in bytes. Set to @code{0} for autodetection.  
+@item chip_width
+Flash chip width. Usually @code{0}.  
+@item bus_width
+Bus width. Usually @code{0}.  
+@item target#
+Target name or index used by OpenOCD.  
+@item flash_start_addr
+Physical flash start address for the selected QSPI memory region.  
+@item mem_no
+Configuration flash memory number.  
+@end table
+
+@item Example
+@example
+flash bank $_FLASHNAME scqspi 0x00000000 0 0 0 $_TARGETNAME 0x01A00000 0
+@end example
+
+@item Notes
+@itemize
+@item This driver is specific to the SC-OBC Module A1 and its integrated QuadSPI controller.
+@item The flash chip select (SPI SS) is fixed to @code{0x01} for configuration NOR flash.
+@item Multiple flash regions can be accessed by changing the @var{mem_no} parameter.
+@end itemize
+@end table
+@end deffn
+
 @subsection Internal Flash (Microcontrollers)
 
 @deffn {Flash Driver} {aduc702x}

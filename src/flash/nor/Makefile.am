@@ -62,6 +62,7 @@ NOR_DRIVERS = \
 	%D%/renesas_rpchf.c \
 	%D%/rp2xxx.c \
 	%D%/rsl10.c \
+	%D%/scqspi.c \
 	%D%/sfdp.c \
 	%D%/sh_qspi.c \
 	%D%/sim3x.c \

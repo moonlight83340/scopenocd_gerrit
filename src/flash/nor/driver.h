@@ -293,6 +293,7 @@ extern const struct flash_driver qn908x_flash;
 extern const struct flash_driver renesas_rpchf_flash;
 extern const struct flash_driver rp2xxx_flash;
 extern const struct flash_driver rsl10_flash;
+extern const struct flash_driver scqspi_flash;
 extern const struct flash_driver sh_qspi_flash;
 extern const struct flash_driver sim3x_flash;
 extern const struct flash_driver stellaris_flash;
