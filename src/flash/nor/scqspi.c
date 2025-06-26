@@ -60,6 +60,7 @@
 #define SCQSPI_ERASE_BLOCK_WAIT_MS   (800U)
 #define SCQSPI_ERASE_SECTOR_WAIT_MS  (10U)
 #define SCQSPI_PAGE_BUFFER_BYTE      (256U)
+#define SCQSPI_DUMMY_CYCLE_COUNT     (4U)
 #define SCQSPI_REG_READ_RETRY(count) (count)
 #define SCQSPI_CRC32_INIT            (0xFFFFFFFF)
 #define SCQSPI_CRC32_FINAL(crc)      (~(crc))
@@ -719,6 +720,163 @@ end:
 	return ret;
 }
 
+static int read_data_from_flash(struct target *target, const uint8_t *read_data, uint32_t read_size)
+{
+	int ret;
+	uint32_t bytes_transferred = 0;
+
+	LOG_DEBUG("Read %u bytes from QSPI flash", read_size);
+
+	while (bytes_transferred < read_size) {
+		uint32_t chunk = MIN(SCQSPI_RX_FIFO_MAX_BYTE, read_size - bytes_transferred);
+
+		for (uint32_t byte_idx = 0; byte_idx < chunk; byte_idx++) {
+			ret = target_write_u32(target, SCOBCA1_FPGA_NORFLASH_QSPI_RDR, 0x00);
+			if (ret != ERROR_OK) {
+				LOG_ERROR("Failed to request RX data at index %u",
+					bytes_transferred + byte_idx);
+				goto end;
+			}
+		}
+
+		for (uint32_t byte_idx = 0; byte_idx < chunk; byte_idx++) {
+			uint8_t byte;
+			ret = target_read_u8(target, SCOBCA1_FPGA_NORFLASH_QSPI_RDR, &byte);
+			if (ret != ERROR_OK) {
+				LOG_ERROR("Failed to read RX data at index %u",
+					bytes_transferred + byte_idx);
+				goto end;
+			}
+			((uint8_t *)read_data)[bytes_transferred + byte_idx] = byte;
+		}
+
+		bytes_transferred += chunk;
+	}
+
+end:
+	return ret;
+}
+
+static int send_dummy_cycle(struct target *target, uint8_t dummy_count)
+{
+	uint32_t discard;
+	int ret;
+
+	LOG_DEBUG("Send dummy cycle %d byte", dummy_count);
+	for (int i = 0; i < dummy_count; i++) {
+		ret = target_write_u32(target, SCOBCA1_FPGA_NORFLASH_QSPI_RDR, 0x00);
+		if (ret != ERROR_OK) {
+			LOG_ERROR("Failed to request RX data");
+			goto end;
+		}
+	}
+
+	if (!is_qspi_idle(target)) {
+		ret = ERROR_FLASH_BUSY;
+		goto end;
+	}
+
+	LOG_DEBUG("Discard dummy data");
+	for (int i = 0; i < dummy_count; i++) {
+		ret = target_read_u32(target, SCOBCA1_FPGA_NORFLASH_QSPI_RDR, &discard);
+		if (ret != ERROR_OK)
+			goto end;
+	}
+
+end:
+	return ret;
+}
+
+static int scqspi_nor_quad_read(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
+	uint32_t count)
+{
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+	struct target *target = bank->target;
+	uint32_t mem_addr = scqspi_info->flash_addr + offset;
+	/*
+	 * Workaround: scqspi_info->dev.qread_cmd is set to 0x00 by default,
+	 * but for our NOR flash (S25FL256L), the correct Quad Read command is 0xEC.
+	 * This is based on the datasheet.
+	 * Reason for the mismatch is unclear, so we override it manually here.
+	 */
+	uint32_t qread_cmd = 0xEC;
+	int ret;
+
+	LOG_DEBUG("Read %d bytes from 0x%08x", count, mem_addr);
+
+	ret = activate_spi_ss(target, scqspi_info->spi_ss);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to activate SPI SS : %d", ret);
+		goto end;
+	}
+
+	LOG_DEBUG("Send Quad I/O Read instruction : 0x%08x", qread_cmd);
+	ret = target_write_u32(target, SCOBCA1_FPGA_NORFLASH_QSPI_TDR, qread_cmd);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to send `Quad I/O Read (4byte)` instruction");
+		goto inactivate_ss;
+	}
+
+	if (!is_qspi_idle(target)) {
+		ret = ERROR_FLASH_BUSY;
+		goto inactivate_ss;
+	}
+
+	ret = activate_spi_ss(target, SCQSPI_SPI_MODE_QUAD + scqspi_info->spi_ss);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to activate SPI SS : %d", ret);
+		goto inactivate_ss;
+	}
+
+	LOG_DEBUG("Send Memory Address (4byte)");
+	ret = write_mem_addr_to_flash(target, mem_addr);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to write memory address to flash");
+		goto inactivate_ss;
+	}
+
+	LOG_DEBUG("Send Mode (0x00)");
+	target_write_u32(target, SCOBCA1_FPGA_NORFLASH_QSPI_TDR, 0x00);
+
+	LOG_DEBUG("Send Dummy Cycle");
+	ret = send_dummy_cycle(target, SCQSPI_DUMMY_CYCLE_COUNT);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed send dummy cycle to flash");
+		goto inactivate_ss;
+	}
+
+	if (!is_qspi_idle(target)) {
+		ret = ERROR_FLASH_BUSY;
+		goto inactivate_ss;
+	}
+
+	ret = read_data_from_flash(target, buffer, count);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to read data to flash : %d", ret);
+		goto inactivate_ss;
+	}
+
+	if (!is_qspi_idle(target)) {
+		ret = ERROR_FLASH_BUSY;
+		goto inactivate_ss;
+	}
+
+inactivate_ss:
+	ret = inactivate_spi_ss(target);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to inactivate SPI SS : %d", ret);
+		goto end;
+	}
+
+	if (!is_qspi_control_done(target)) {
+		LOG_ERROR("Confirm SPI Control is Done failed");
+		ret = ERROR_FAIL;
+	}
+
+end:
+	return ret;
+}
+
 /* -------------------------------------------------------------------------
  * Command handler functions
  * -------------------------------------------------------------------------*/
@@ -863,8 +1021,37 @@ end:
 
 static int scqspi_read(struct flash_bank *bank, uint8_t *buffer, uint32_t offset, uint32_t count)
 {
-	LOG_DEBUG("%s", __func__);
-	return ERROR_OK;
+	int ret;
+	struct target *target = bank->target;
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+
+	LOG_DEBUG("%s: offset=0x%08x count=0x%08x (base: 0x%08x)", __func__, offset, count,
+		scqspi_info->flash_addr);
+
+	if (target->state != TARGET_HALTED) {
+		LOG_ERROR("Target not halted");
+		ret = ERROR_TARGET_NOT_HALTED;
+		goto end;
+	}
+
+	if (!(scqspi_info->probed)) {
+		LOG_ERROR("Flash bank not probed");
+		ret = ERROR_FLASH_BANK_NOT_PROBED;
+		goto end;
+	}
+
+	if (offset + count > bank->size) {
+		LOG_ERROR("Flash access out of range: offset=%u, count=%u, bank_size=%u", offset,
+			count, bank->size);
+		return ERROR_FLASH_DST_OUT_OF_BANK;
+	}
+
+	ret = scqspi_nor_quad_read(bank, buffer, offset, count);
+	if (ret != ERROR_OK)
+		LOG_ERROR("Failed to read data on flash : %d", ret);
+
+end:
+	return ret;
 }
 
 static int scqspi_probe(struct flash_bank *bank)
