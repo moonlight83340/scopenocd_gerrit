@@ -980,6 +980,51 @@ static int read_data(struct flash_bank *bank, const uint8_t *buffer, uint32_t of
 				       buffer);
 }
 
+static int verify_buffer(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
+			 uint32_t count)
+{
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+
+	int ret;
+	uint32_t expected_crc, actual_crc;
+
+	LOG_DEBUG("Verify %d bytes from 0x%08x", count, (scqspi_info->flash_addr + offset));
+
+	ret = image_calculate_checksum(buffer, count, &expected_crc);
+	if (ret != ERROR_OK) {
+		goto end;
+	}
+
+	uint8_t *flash_buf = malloc(count);
+	if (!flash_buf) {
+		ret = ERROR_FAIL;
+		goto end;
+	}
+
+	ret = read_data(bank, flash_buf, offset, count);
+	if (ret != ERROR_OK) {
+		goto clean;
+	}
+
+	ret = image_calculate_checksum(flash_buf, count, &actual_crc);
+	if (ret != ERROR_OK) {
+		goto clean;
+	}
+
+	if (actual_crc == expected_crc) {
+		ret = ERROR_OK;
+	} else {
+		LOG_ERROR("CRC mismatch : expected 0x%08" PRIx32 ", got 0x%08" PRIx32, expected_crc,
+			  actual_crc);
+		ret = ERROR_FAIL;
+	}
+
+clean:
+	free(flash_buf);
+end:
+	return ret;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Command handler functions                                                 */
 /* ------------------------------------------------------------------------- */
@@ -1309,8 +1354,37 @@ static int scqspi_flash_blank_check(struct flash_bank *bank)
 static int scqspi_verify(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
 			 uint32_t count)
 {
-	/* Not implemented */
-	return ERROR_OK;
+	struct target *target = bank->target;
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+
+	int ret;
+
+	LOG_DEBUG("%s: offset=0x%08" PRIx32 " count=0x%08" PRIx32, __func__, offset, count);
+
+	if (target->state != TARGET_HALTED) {
+		LOG_ERROR("Target not halted");
+		ret = ERROR_TARGET_NOT_HALTED;
+		goto end;
+	}
+
+	if (!(scqspi_info->probed)) {
+		LOG_ERROR("Flash bank not probed");
+		ret = ERROR_FLASH_BANK_NOT_PROBED;
+		goto end;
+	}
+
+	if (offset + count > bank->size) {
+		LOG_WARNING("Verify beyond end of flash. Extra data ignored.");
+		count = bank->size - offset;
+	}
+
+	ret = verify_buffer(bank, buffer, offset, count);
+	if (ret != ERROR_OK) {
+		LOG_ERROR("Failed to read data on flash : %d", ret);
+	}
+
+end:
+	return ret;
 }
 
 static const struct command_registration scqspi_command_handlers[] = {
