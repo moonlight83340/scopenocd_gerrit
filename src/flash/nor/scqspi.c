@@ -11,6 +11,7 @@
 #include "imp.h"
 #include "spi.h"
 #include <helper/bits.h>
+#include <helper/crc32.h>
 #include <helper/time_support.h>
 #include <target/image.h>
 
@@ -879,6 +880,74 @@ end:
 	return ret;
 }
 
+static uint32_t calculate_image_crc32(const uint8_t *data, size_t len)
+{
+	uint32_t crc = SCQSPI_CRC32_INIT;
+
+	while (len > 0) {
+		size_t chunk = len > SCQSPI_VERIFY_CHUNK_SIZE ? SCQSPI_VERIFY_CHUNK_SIZE : len;
+		crc = crc32_le(CRC32_POLY_LE, crc, data, chunk);
+		data += chunk;
+		len -= chunk;
+	}
+
+	return SCQSPI_CRC32_FINAL(crc);
+}
+
+static int calculate_flash_crc32(struct flash_bank *bank, uint32_t offset, size_t len,
+	uint32_t *crc_out)
+{
+	uint8_t block_buf[SCQSPI_VERIFY_CHUNK_SIZE];
+	uint32_t crc = SCQSPI_CRC32_INIT;
+	int ret;
+
+	while (len > 0) {
+		size_t chunk = len > SCQSPI_VERIFY_CHUNK_SIZE ? SCQSPI_VERIFY_CHUNK_SIZE : len;
+
+		ret = scqspi_nor_quad_read(bank, block_buf, offset, chunk);
+		if (ret != ERROR_OK) {
+			LOG_ERROR("Failed to read flash at offset 0x%08" PRIx32, offset);
+			goto end;
+		}
+
+		crc = crc32_le(CRC32_POLY_LE, crc, block_buf, chunk);
+		offset += chunk;
+		len -= chunk;
+	}
+
+	*crc_out = SCQSPI_CRC32_FINAL(crc);
+
+end:
+	return ret;
+}
+
+static int scqspi_nor_verify(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
+	uint32_t count)
+{
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+
+	uint32_t expected_crc = calculate_image_crc32(buffer, count);
+	uint32_t actual_crc;
+	int ret;
+
+	LOG_DEBUG("Verify %d bytes from 0x%08x", count, (scqspi_info->flash_addr + offset));
+
+	ret = calculate_flash_crc32(bank, offset, count, &actual_crc);
+	if (ret != ERROR_OK)
+		goto end;
+
+	if (actual_crc == expected_crc)
+		ret = ERROR_OK;
+	else {
+		LOG_ERROR("CRC mismatch : expected 0x%08" PRIx32 ", got 0x%08" PRIx32, expected_crc,
+			actual_crc);
+		ret = ERROR_FAIL;
+	}
+
+end:
+	return ret;
+}
+
 /* -------------------------------------------------------------------------
  * Command handler functions
  * -------------------------------------------------------------------------*/
@@ -1183,10 +1252,36 @@ static int scqspi_protect(struct flash_bank *bank, int set, unsigned int first, 
 }
 
 static int scqspi_verify(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
-			 uint32_t count)
+	uint32_t count)
 {
-	/* Not implemented */
-	return ERROR_OK;
+	struct target *target = bank->target;
+	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
+
+	int ret;
+
+	LOG_DEBUG("%s: offset=0x%08" PRIx32 " count=0x%08" PRIx32, __func__, offset, count);
+
+	if (target->state != TARGET_HALTED) {
+		LOG_ERROR("Target not halted");
+		ret = ERROR_TARGET_NOT_HALTED;
+		goto end;
+	}
+
+	if (!(scqspi_info->probed)) {
+		LOG_ERROR("Flash bank not probed");
+		ret = ERROR_FLASH_BANK_NOT_PROBED;
+		goto end;
+	}
+
+	if (offset + count > bank->size)
+		return ERROR_FLASH_DST_OUT_OF_BANK;
+
+	ret = scqspi_nor_verify(bank, buffer, offset, count);
+	if (ret != ERROR_OK)
+		LOG_ERROR("Failed to read data on flash : %d", ret);
+
+end:
+	return ret;
 }
 
 static const struct command_registration scqspi_command_handlers[] = {
