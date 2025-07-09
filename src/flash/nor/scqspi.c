@@ -11,6 +11,7 @@
 #include "imp.h"
 #include "spi.h"
 #include <helper/bits.h>
+#include <helper/crc32.h>
 #include <helper/time_support.h>
 #include <target/image.h>
 
@@ -61,6 +62,10 @@
 #define SCQSPI_PAGE_BUFFER_BYTE      (256U)
 #define SCQSPI_DUMMY_CYCLE_COUNT     (4U)
 #define SCQSPI_REG_READ_RETRY(count) (count)
+
+#define SCQSPI_CRC32_INIT        0xFFFFFFFF
+#define SCQSPI_CRC32_FINAL(crc)  (~(crc))
+#define SCQSPI_VERIFY_BLOCK_SIZE 4096
 
 /**
  * struct scqspi_flash_bank - Represents a NOR flash bank for SCQSPI interface.
@@ -980,35 +985,58 @@ static int read_data(struct flash_bank *bank, const uint8_t *buffer, uint32_t of
 				       buffer);
 }
 
+static uint32_t calculate_image_crc32_le(const uint8_t *data, size_t len)
+{
+	uint32_t crc = SCQSPI_CRC32_INIT;
+
+	while (len > 0) {
+		size_t chunk = len > SCQSPI_VERIFY_BLOCK_SIZE ? SCQSPI_VERIFY_BLOCK_SIZE : len;
+		crc = crc32_le(CRC32_POLY_LE, crc, data, chunk);
+		data += chunk;
+		len -= chunk;
+	}
+
+	return SCQSPI_CRC32_FINAL(crc);
+}
+
+static int calculate_flash_crc32_le(struct flash_bank *bank, uint32_t offset, size_t len,
+				    uint32_t *crc_out)
+{
+	uint8_t block_buf[SCQSPI_VERIFY_BLOCK_SIZE];
+	uint32_t crc = SCQSPI_CRC32_INIT;
+
+	while (len > 0) {
+		size_t chunk = len > SCQSPI_VERIFY_BLOCK_SIZE ? SCQSPI_VERIFY_BLOCK_SIZE : len;
+
+		int ret = read_data(bank, block_buf, offset, chunk);
+		if (ret != ERROR_OK) {
+			LOG_ERROR("Failed to read flash at offset 0x%08" PRIx32, offset);
+			return ret;
+		}
+
+		crc = crc32_le(CRC32_POLY_LE, crc, block_buf, chunk);
+		offset += chunk;
+		len -= chunk;
+	}
+
+	*crc_out = SCQSPI_CRC32_FINAL(crc);
+	return ERROR_OK;
+}
+
 static int verify_buffer(struct flash_bank *bank, const uint8_t *buffer, uint32_t offset,
 			 uint32_t count)
 {
 	struct scqspi_flash_bank *scqspi_info = bank->driver_priv;
 
+	uint32_t expected_crc = calculate_image_crc32_le(buffer, count);
+	uint32_t actual_crc;
 	int ret;
-	uint32_t expected_crc, actual_crc;
 
 	LOG_DEBUG("Verify %d bytes from 0x%08x", count, (scqspi_info->flash_addr + offset));
 
-	ret = image_calculate_checksum(buffer, count, &expected_crc);
+	ret = calculate_flash_crc32_le(bank, offset, count, &actual_crc);
 	if (ret != ERROR_OK) {
 		goto end;
-	}
-
-	uint8_t *flash_buf = malloc(count);
-	if (!flash_buf) {
-		ret = ERROR_FAIL;
-		goto end;
-	}
-
-	ret = read_data(bank, flash_buf, offset, count);
-	if (ret != ERROR_OK) {
-		goto clean;
-	}
-
-	ret = image_calculate_checksum(flash_buf, count, &actual_crc);
-	if (ret != ERROR_OK) {
-		goto clean;
 	}
 
 	if (actual_crc == expected_crc) {
@@ -1019,8 +1047,6 @@ static int verify_buffer(struct flash_bank *bank, const uint8_t *buffer, uint32_
 		ret = ERROR_FAIL;
 	}
 
-clean:
-	free(flash_buf);
 end:
 	return ret;
 }
