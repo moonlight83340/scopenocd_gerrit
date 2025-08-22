@@ -67,6 +67,9 @@
 #define SCQSPI_CRC32_FINAL(crc)  (~(crc))
 #define SCQSPI_VERIFY_CHUNK_SIZE 4096U
 
+#define SCQSPI_ALL_MASK           GENMASK(31, 0)
+#define SYSREG_CFGMEMSEL_MON_MASK GENMASK(5, 4)	/* CFGMEMSEL and CFGMEMMON bits mask */
+
 struct scqspi_flash_bank {
 	struct target *target;
 	bool probed;
@@ -118,7 +121,7 @@ static bool is_qspi_control_done(struct target *target)
 
 	LOG_DEBUG("Confirm QSPI Interrupt Status is `SPI Control Done`");
 
-	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ISR, 0x01, GENMASK(26, 0),
+	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ISR, 0x01, SCQSPI_ALL_MASK,
 			SCQSPI_REG_READ_RETRY(10))) {
 		LOG_ERROR("Confirm QSPI Interrupt Status failed");
 		return false;
@@ -131,7 +134,7 @@ static bool is_qspi_control_done(struct target *target)
 		return false;
 	}
 
-	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ISR, 0x00, GENMASK(26, 0),
+	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ISR, 0x00, SCQSPI_ALL_MASK,
 			SCQSPI_REG_READ_RETRY(10))) {
 		LOG_ERROR("Failed to read QSPI Interrupt Status");
 		return false;
@@ -144,7 +147,7 @@ static bool is_qspi_idle(struct target *target)
 {
 	LOG_DEBUG("Confirm QSPI Access Status is `Idle`");
 
-	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ASR, SCQSPI_ASR_IDLE, GENMASK(0, 0),
+	if (!verify(target, SCOBCA1_FPGA_NORFLASH_QSPI_ASR, SCQSPI_ASR_IDLE, SCQSPI_ALL_MASK,
 			SCQSPI_REG_READ_RETRY(10))) {
 		LOG_ERROR("QSPI (Config Memory) is busy");
 		return false;
@@ -249,7 +252,7 @@ static int select_mem(struct target *target, uint8_t mem_no)
 		return ret;
 	}
 
-	if (!verify(target, SCOBCA1_SYSREG_CFGMEMCTL, expval, GENMASK(5, 4),
+	if (!verify(target, SCOBCA1_SYSREG_CFGMEMCTL, expval, SYSREG_CFGMEMSEL_MON_MASK,
 			SCQSPI_REG_READ_RETRY(1000))) {
 		LOG_ERROR("Failed to select Config Memory %d", mem_no);
 		return ERROR_FAIL;
